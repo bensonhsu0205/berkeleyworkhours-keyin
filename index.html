@@ -206,6 +206,8 @@ details#advBox h4{margin:0 0 6px;font-size:13px;color:var(--muted)}
 .auto.off .dot{background:var(--warn)}
 .auto button{border:0;background:none;color:var(--muted);font-size:12px;padding:2px 6px;text-decoration:underline}
 .banner{background:#fbf1de;border-bottom:1px solid #e6d5ad;color:#8f6a12;padding:8px 16px;font-size:13px;display:none}
+.banner button.act{margin-left:10px;border:1px solid #c09024;background:#fff;color:#8f6a12;border-radius:14px;padding:3px 12px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit}
+.banner button.dismiss{margin-left:6px;border:0;background:none;color:inherit;text-decoration:underline;cursor:pointer;font-size:12.5px;font-family:inherit;opacity:.8}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#23282f;color:#fff;padding:10px 20px;border-radius:8px;z-index:99;font-size:13px;box-shadow:0 6px 24px rgba(0,0,0,.25)}
 
 /* 權限審核關卡：只有設定了 AUTH_API_URL 才會顯示，平常預設不會擋人 */
@@ -274,6 +276,7 @@ details#advBox h4{margin:0 0 6px;font-size:13px;color:var(--muted)}
       <span class="hint" id="pageHint"></span>
     </div>
     <div class="banner" id="lsBanner"></div>
+    <div class="banner" id="monthBanner"></div>
     <main>
   <div class="pane" id="pane-start">
    <div class="setup">
@@ -373,7 +376,7 @@ details#advBox h4{margin:0 0 6px;font-size:13px;color:var(--muted)}
           <button id="btnImportX">匯入公司時數表 (.xlsx)</button>
           <input type="file" id="fileX" accept=".xlsx" hidden>
           <input type="file" id="fileIn" accept=".json" hidden>
-          <span class="fhint">已填好的公司 Excel 直接讀進來</span>
+          <span class="fhint">只認本系統匯出過的檔案，接回來沿用名單</span>
         </div>
         <div class="frow" style="display:none"><label>多社區</label>
           <select id="cSel" title="切換社區"></select>
@@ -1372,8 +1375,20 @@ const ROLEWORD=/組長|日班|夜班|保全|祕書|秘書|經理|副理|主秘|�
 const LEAVEMAP={'國假':'國','國':'國','國休':'國','特':'特','特休':'特','事假':'事','事':'事',
   '生理假':'生','生理':'生','生':'生','喪假':'喪','喪':'喪','病假':'病','病':'病','颱風假':'颱','颱風':'颱','颱':'颱'};
 
+// 系統匯出標記：只有這個系統自己 exportXlsx() 匯出的公司時數表，「系統」分頁最右邊（ZZ1）
+// 會多寫一格這個文字當隱藏標記。用來判斷「接手舊表」匯入的檔案是不是本系統自己產出的——
+// 寶哥希望這個功能只接受回收本系統匯出的檔案，非本系統來源（包含手填、舊公司範本）一律不接受。
+const SYS_MARK='BHSYS_EXPORT_V1';
+
 function parseTimesheet(sheets){
-  const groups={sec:[],staff:[]}; let community='',branch='',notes={sec:[],staff:[]}, dayCount=0, hitSheets=[];
+  const groups={sec:[],staff:[]}; let community='',branch='',srcY=0,srcM=0,notes={sec:[],staff:[]}, dayCount=0, hitSheets=[];
+  // 標記掃描要獨立在外層跑一次，不能放進下面「找星期列」的迴圈裡：我們自己的「系統」分頁
+  // 本來就沒有星期列，會被下面 `if(!wRow) continue;` 直接跳過，標記永遠掃不到。
+  let isSystemExport=false;
+  for(const {cells} of sheets){
+    for(const ref in cells){ if(cells[ref]===SYS_MARK){ isSystemExport=true; break; } }
+    if(isSystemExport) break;
+  }
   for(const {name,cells} of sheets){
     // 1) 找星期列：連續 7 格以上是 日一二三四五六
     let wRow=0,dCol=0,dLen=0;
@@ -1385,11 +1400,14 @@ function parseTimesheet(sheets){
     }
     if(!wRow) continue;
     hitSheets.push(name); dayCount=Math.max(dayCount,dLen);
-    // 2) 案場名稱 / 分公司
+    // 2) 案場名稱 / 分公司 / 這份檔案本身是哪一年哪一月的表（標題列通常長這樣：
+    //    「伯克錸 - 台中　　115年07月份現場人員薪資核算表」），抓年月是為了防呆：
+    //    避免社區經理不小心把舊月份的檔案匯入到目前正在編輯的月份、把本月資料蓋掉卻不自知。
     for(const ref in cells){
       const v=cells[ref];
       if(typeof v==='string'){
         if(!branch&&/年\s*\d{1,2}\s*月份現場人員薪資核算表/.test(v)) branch=v.split(/\s{2,}|\s(?=\d{3}年)/)[0].trim();
+        if(!srcY){ const dm=v.match(/(\d{2,3})\s*年\s*(\d{1,2})\s*月份現場人員薪資核算表/); if(dm){ srcY=+dm[1]; srcM=+dm[2]; } }
         if(/^案場$/.test(v)){}
       }
     }
@@ -1437,19 +1455,38 @@ function parseTimesheet(sheets){
     }
     if(notes.__pending){ (isSec?notes.sec:notes.staff).push(...notes.__pending); delete notes.__pending; }
   }
-  return {groups,community,branch,notes,dayCount,hitSheets};
+  return {groups,community,branch,srcY,srcM,notes,dayCount,hitSheets,isSystemExport};
 }
 
 async function importTimesheet(file){
   const sheets=await readXlsxSheets(file);
   const R=parseTimesheet(sheets);
+  // 只接受這個系統自己匯出過的公司時數表：外部來源或手動填寫的 Excel 欄位判斷難保準確，
+  // 匯入還可能整月覆蓋掉資料卻沒發現，寶哥決定乾脆不支援，直接擋下來、不給覆蓋確認的機會。
+  if(!R.isSystemExport){
+    alert('「接手舊表」只接受用這個系統匯出過的公司時數表（案場設定裡「匯出公司時數表」產生的檔案），不支援匯入其他來源或手動填寫的 Excel。\n\n如果這份檔案本來就是系統匯出的，可能是更新前的舊版本匯出的、還沒有這個標記，麻煩用目前這個版本的系統重新匯出一次最新的檔案，再拿新的檔案來匯入。');
+    return;
+  }
   const n1=R.groups.sec.length, n2=R.groups.staff.length;
   if(!n1&&!n2){ alert('這個檔案裡找不到時數表格式（需要有「星期」列與人員時數）。'); return; }
   const hsec=R.groups.sec.reduce((a,p)=>a+Object.values(p.days).filter(v=>typeof v==='number').reduce((x,y)=>x+y,0),0);
   const hstf=R.groups.staff.reduce((a,p)=>a+Object.values(p.days).filter(v=>typeof v==='number').reduce((x,y)=>x+y,0),0);
-  const msg=`偵測結果\n\n分頁：${R.hitSheets.join('、')}\n案場：${R.community||'（未偵測到）'}\n`+
+  // 防呆：這份檔案本身標題寫的是哪一年哪一月，跟「目前正在編輯的月份」兜不起來的話，
+  // 很可能是不小心選錯檔案（例如把舊月份、已經填好的表拿來匯入），要特別強調提醒，
+  // 不要讓人以為只是「匯入到本月」這麼單純，一confirm 就把本月資料蓋掉。
+  const [tY,tM]=DB.current.split('-').map(Number);
+  const srcMismatch = R.srcY && (R.srcY!==tY || R.srcM!==tM);
+  const warnHead = srcMismatch
+    ? `⚠️ 檔案月份跟目前編輯的月份對不起來：\n\n`+
+      `1. 這份檔案內容是「${R.srcY}年${R.srcM}月」的\n`+
+      `2. 你現在正在編輯「${tY}年${tM}月」\n`+
+      `3. 繼續的話，「${tY}年${tM}月」的時數／假別會被「${R.srcY}年${R.srcM}月」的內容整個蓋掉\n`+
+      `   （不是只換人員名單，是連同時數一起蓋過去）\n\n`
+    : '';
+  const msg=warnHead+`偵測結果\n\n分頁：${R.hitSheets.join('、')}\n案場：${R.community||'（未偵測到）'}\n`+
     `保全 ${n1} 人／${hsec} 小時\n主管＋祕書 ${n2} 人／${hstf} 小時\n合計 ${hsec+hstf} 小時\n\n`+
-    `確定匯入到「${DB.current.replace('-','年')}月」？現有資料會被覆蓋。`;
+    (srcMismatch ? `確定仍要用這份「${R.srcY}年${R.srcM}月」的舊表，蓋掉目前「${tY}年${tM}月」的資料？`
+                 : `確定匯入到「${DB.current.replace('-','年')}月」？現有資料會被覆蓋。`);
   if(!confirm(msg)) return;
   // 網頁版：若檔案的案場和目前社區不同，先問要不要另開一個社區，避免蓋掉別人的資料
   if(R.community && DB.community && R.community!==DB.community){
@@ -1579,6 +1616,8 @@ async function exportXlsx(){
     const monthTotal = Array.from({length:N},(_,i)=>p.p.days[i+1]).reduce((a,v)=>a+(typeof v==='number'?v:0),0);
     sy=setCell(sy,'BM'+r, `SUM(C${r}:BL${r})`, 'f','sys', monthTotal);
   }
+  // 隱藏標記：寫在遠離資料範圍的 ZZ1，讓「接手舊表」匯入時能判斷這份檔案是不是本系統匯出的。
+  sy=setCell(sy,'ZZ1', SYS_MARK, 's','sys');
   S.sheet1=sy;
 
   for(const k of ['sheet1','sheet2','sheet3']) zip.file('xl/worksheets/'+k+'.xml', S[k]);
@@ -1631,7 +1670,7 @@ function migrate(o){
   });
   delete o.posts; o.v=3;
 }
-function nextMonth(){
+function advanceOneMonth_(){                            // 建立並切換到「目前月份」的下一個月，不顯示 toast（給 nextMonth／月份提醒共用）
   syncMeta();
   let {y,m}=ym(); m++; if(m>12){m=1;y++;}
   const key=y+'-'+String(m).padStart(2,'0');
@@ -1642,7 +1681,30 @@ function nextMonth(){
                     notesSec:'',notesStaff:'',reqSec:'',reqStaff:'',
                     est:JSON.parse(JSON.stringify(src.est||blankMonth().est)), holidays:[]};
   }
-  DB.current=key; bootUI(); toast('已建立 '+m2(y,m)+'，人員名單已沿用');
+  DB.current=key; return {y,m};
+}
+function nextMonth(){
+  const {y,m}=advanceOneMonth_(); bootUI(); toast('已建立 '+m2(y,m)+'，人員名單已沿用');
+}
+// 提醒「畫面停在舊月份」：拿今天的實際日期跟目前開著的月份比，今天已經進入更新的月份、
+// 但畫面還沒跟上時，跳一條可以直接一鍵補建到最新月份的橫幅。純提醒用，不會自己動資料，
+// 使用者也可以按「先不要」關掉；只在「進系統」「切換社區」這種進入新畫面的時機檢查一次，
+// 不會在使用者自己手動切去查舊月份資料時跳出來打擾。
+function checkMonthBehind(){
+  const b=document.getElementById('monthBanner'); if(!b) return;
+  const now=new Date(), ty=now.getFullYear()-1911, tm=now.getMonth()+1;
+  const {y:cy,m:cm}=ym();
+  if(ty*12+tm<=cy*12+cm){ b.style.display='none'; b.innerHTML=''; return; }
+  b.innerHTML=`現在已經是 ${ty}年${tm}月，畫面還停在 ${cy}年${cm}月，記得建立新月份再開始打這個月的時數。`+
+    `<button class="act" id="btnCatchUpMonth">建立並切換到 ${ty}年${tm}月 →</button>`+
+    `<button class="dismiss" id="btnDismissMonthBanner">先不要，我知道了</button>`;
+  b.style.display='block';
+  document.getElementById('btnCatchUpMonth').onclick=()=>{
+    let steps=0;
+    while(true){ const {y,m}=ym(); if(y*12+m>=ty*12+tm||steps>36) break; advanceOneMonth_(); steps++; }
+    bootUI(); b.style.display='none'; toast(`已建立到 ${ty}年${tm}月，人員名單已沿用`);
+  };
+  document.getElementById('btnDismissMonthBanner').onclick=()=>{ b.style.display='none'; };
 }
 
 /* ============ 綁定 ============ */
@@ -1676,7 +1738,7 @@ function switchComm(cid){
   const rec=STORE.all[cid]; if(!rec) return;
   DB=rec.db; migrate(DB); if(!DB.months[DB.current]) DB.current=Object.keys(DB.months).sort()[0];
   STORE.active=cid; try{ persistStore(); }catch(e){}
-  bootUI(); showTab(CURTAB); toast('已切換到「'+(DB.community||'未命名')+'」');
+  bootUI(); showTab(CURTAB); toast('已切換到「'+(DB.community||'未命名')+'」'); checkMonthBehind();
 }
 function addComm(name, seed){
   syncMeta(); saveNow();
@@ -1901,6 +1963,9 @@ document.body.appendChild(dl2);
 /* ============ 權限審核關卡 ============ */
 // AUTH_API_URL 留空＝完全不啟用審核（預設狀態，跟以前一樣，任何人都能直接用）。
 // 部署好 Google Apps Script 後台之後，把網址填進這裡，重新產生網頁版即可開始要求員編審核。
+// 這裡故意留成可替換的標記，交給 build.py 決定：
+// 「需要員編授權」版本會填入寶哥部署的 Google Apps Script 網址；
+// 「免登入」版本會填成空字串（initAuth() 看到空字串會直接略過登入關卡，跟原本沒有這段功能時一樣）。
 const AUTH_API_URL = 'https://script.google.com/macros/s/AKfycbwdZ2t7Wq5KrKc8LZZGSVBwsuFJPVHGEXlNOYdaK6erUZO-nAsimEKt9C-rP5YrvTFr/exec';
 const AUTH_LS_KEY='bh-auth-approved';   // 注意：故意不用 LSPREFIX（'berkeley-hours:'）開頭，
                                           // 否則會被 migrateLegacy() 誤判成舊版單機存檔而砍掉，
@@ -1992,6 +2057,7 @@ function startApp(){
     DB=newDB(); bootUI(); saveNow();
     showTab('start');                      // 第一次進來先看說明與設定
   }
+  checkMonthBehind();
   // 關掉分頁前把還沒寫入的最後一筆刷進去（自動儲存有 0.4 秒延遲）
   window.addEventListener('pagehide',()=>{ try{ syncMeta(); saveNow(); }catch(e){} });
   document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden'){ try{ syncMeta(); saveNow(); }catch(e){} } });
