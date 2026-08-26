@@ -1,0 +1,15 @@
+# 網址永遠給最新版：HTML 與 service worker 不做長期快取
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/guide.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
