@@ -64,7 +64,11 @@ body{overflow:hidden}
 .side nav button:hover .navpop{display:block}
 
 /* 中間工作區 */
-.mid{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg)}
+/* min-height:0 一定要加：.mid 自己也是 flex 子項目，沒有這行的話它會被內容「撐開」到
+   比畫面還高（預設 min-height:auto 不會讓 flex 子項目縮小到比內容還矮），連帶讓下面
+   main 的 flex:1+overflow:auto 整個失效——變成整頁被切斷在畫面下緣、滑鼠滾輪完全滾不動，
+   只能用瀏覽器縮放勉強塞進畫面。社區經理回報「使用說明、懶人包、時數表都不能滾輪」就是這個。 */
+.mid{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--bg)}
 .mtop{display:none}
 main{flex:1;min-height:0;overflow:auto;padding:18px 20px}
 
